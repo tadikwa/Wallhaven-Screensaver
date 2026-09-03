@@ -5,7 +5,7 @@ It rotates high-resolution artwork automatically, adapts Wallhaven searches to t
 
 > This project is not affiliated with or endorsed by Wallhaven.
 
-> **Status:** `0.1.0` preview, tested successfully as a Windows screen saver.
+> **Status:** `0.1.0` release, tested successfully as a Windows screen saver.
 
 ## Configuration preview
 
@@ -100,7 +100,7 @@ The runtime contacts Wallhaven only for image search and image downloads. It doe
 
 ## Release signing
 
-The `0.1.0` preview is unsigned. Verify the SHA-256 file provided with the release before use.
+The `0.1.0` release is unsigned. Verify the SHA-256 file provided with the release before use.
 
 ## License
 
