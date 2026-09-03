@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>WallhavenScreensaver</AssemblyName>
+    <RootNamespace>WallhavenScreensaver</RootNamespace>
+    <Product>Wallhaven Screensaver</Product>
+    <Description>Native Windows screensaver powered by the public SFW Wallhaven API.</Description>
+    <Company>Wallhaven Screensaver Project</Company>
+    <Authors>tadikwa</Authors>
+    <Copyright>Copyright © 2026 Wallhaven Screensaver Project</Copyright>
+    <RepositoryUrl>https://github.com/tadikwa/Wallhaven-Screensaver</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\Wallhaven-Screensaver.ico</ApplicationIcon>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+</Project>

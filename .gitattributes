@@ -1,0 +1,8 @@
+# Deterministic line endings across Windows and GitHub Actions.
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.ico binary
+*.png binary
