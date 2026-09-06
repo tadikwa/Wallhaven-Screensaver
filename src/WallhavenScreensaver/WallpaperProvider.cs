@@ -1,276 +1,472 @@
 using System.Drawing;
-using System.Net.Http.Headers;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace WallhavenScreensaver;
 
+internal sealed record PreparedWallpaper(
+    CacheLease Lease,
+    Size Target)
+{
+    public string Id => Lease.Id;
+    public string Path => Lease.Path;
+    public string PoolKey => Lease.PoolKey;
+}
+
 internal sealed class WallpaperProvider : IDisposable
 {
-    private readonly HttpClient _http;
+    private const int CacheLowWatermark = 4;
+    private const int MaxSearchPagesPerRefill = 4;
+
     private readonly AppSettings _settings;
     private readonly HistoryStore _history;
-    private readonly SemaphoreSlim _fetchLock = new(1, 1);
-    private readonly Queue<WallpaperItem> _pool = new();
-    private Size _poolTarget;
+    private readonly CacheStore _cache;
+    private readonly WallhavenClient _client;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly CancellationTokenSource _disposeCts = new();
+    private readonly Dictionary<string, PoolCursor> _cursors = new();
+    private Task? _backgroundRefill;
 
     public WallpaperProvider(AppSettings settings)
     {
         _settings = settings;
         _history = new HistoryStore(settings.HistoryMaxIds);
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        var version = typeof(WallpaperProvider).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
-        _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("WallhavenScreensaver", version));
-        _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        _cache = new CacheStore(
+            maxFiles: settings.CacheMaxFiles,
+            maxBytes: (long)settings.CacheMaxMiB * 1024L * 1024L);
+        _client = new WallhavenClient();
     }
 
-    public async Task<string?> GetNextImagePathAsync(Size target, CancellationToken cancellationToken)
+    public async Task<PreparedWallpaper?> GetNextWallpaperAsync(
+        Size target,
+        CancellationToken cancellationToken)
     {
         AppPaths.EnsureCreated();
-        await _fetchLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var poolKey = PoolKeyBuilder.Build(_settings, target);
+        PreparedWallpaper? prepared = null;
+        var scheduleRefill = false;
+
+        await _gate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+
         try
         {
-            for (var refillAttempt = 0; refillAttempt < 4; refillAttempt++)
+            _cache.EnforceLimits();
+
+            var history = _history.Snapshot();
+            var lease = _cache.TryLease(
+                poolKey,
+                history,
+                allowRecent: false);
+
+            if (lease is null)
             {
-                if (_pool.Count == 0 || !SimilarTarget(_poolTarget, target))
-                {
-                    _pool.Clear();
-                    _poolTarget = target;
-                    await RefillPoolAsync(target, cancellationToken).ConfigureAwait(false);
-                }
+                await RefillPoolAsync(
+                        poolKey,
+                        target,
+                        requestedTarget: 1,
+                        allowRecent: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
 
-                while (_pool.Count > 0)
-                {
-                    var item = _pool.Dequeue();
-                    if (_history.Contains(item.Id))
-                        continue;
-
-                    try
-                    {
-                        var path = await DownloadAsync(item, cancellationToken).ConfigureAwait(false);
-                        _history.Add(item.Id);
-                        CleanupCache();
-                        return path;
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Write("WARN", $"Download failed for {item.Id}: {ex.Message}");
-                    }
-                }
-
-                // Try another Wallhaven page before falling back to the cache.
-                _pool.Clear();
+                history = _history.Snapshot();
+                lease = _cache.TryLease(
+                    poolKey,
+                    history,
+                    allowRecent: false);
             }
 
-            if (_settings.UseCacheFallback)
-                return GetRandomCachedImage();
+            // Long-term history is a strong preference rather than a permanent
+            // ban. Only after fresh refill is exhausted do we allow the oldest
+            // historical entries. seenToday remains an absolute exclusion.
+            if (lease is null)
+            {
+                await RefillPoolAsync(
+                        poolKey,
+                        target,
+                        requestedTarget: 1,
+                        allowRecent: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
 
-            return null;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Log.Write("WARN", $"Wallhaven request failed: {ex.Message}");
-            return _settings.UseCacheFallback ? GetRandomCachedImage() : null;
+                history = _history.Snapshot();
+                lease = _cache.TryLease(
+                    poolKey,
+                    history,
+                    allowRecent: true);
+            }
+
+            if (lease is null)
+            {
+                Log.Write(
+                    "WARN",
+                    $"No eligible wallpaper for pool={poolKey}; keeping current image.");
+                return null;
+            }
+
+            prepared = new PreparedWallpaper(lease, target);
+            scheduleRefill =
+                _cache.CountPool(poolKey) <= CacheLowWatermark;
         }
         finally
         {
-            _fetchLock.Release();
+            _gate.Release();
         }
+
+        if (scheduleRefill && prepared is not null)
+            ScheduleRefill(prepared.PoolKey, target);
+
+        return prepared;
     }
 
-    private async Task RefillPoolAsync(Size target, CancellationToken cancellationToken)
+    public void CommitDisplayed(PreparedWallpaper wallpaper)
     {
-        var query = WallhavenQueryBuilder.Build(_settings, target);
-        using var response = await _http.GetAsync(query, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        WallpaperDisplayCommitter.CommitSuccess(
+            _history,
+            _cache,
+            wallpaper.Lease);
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var payload = await JsonSerializer.DeserializeAsync<WallhavenSearchResponse>(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        DiagnosticsStore.Increment(
+            DiagnosticCounters.Accepted);
 
-        if (payload?.Data is null || payload.Data.Count == 0)
+        Log.Write(
+            "INFO",
+            $"candidate_accepted id={wallpaper.Id} pool={wallpaper.PoolKey}");
+
+        ScheduleRefill(wallpaper.PoolKey, wallpaper.Target);
+    }
+
+    public void MarkDisplayFailed(PreparedWallpaper wallpaper)
+    {
+        WallpaperDisplayCommitter.CommitFailure(
+            _cache,
+            wallpaper.Lease);
+
+        Log.Write(
+            "WARN",
+            $"display_failed id={wallpaper.Id} pool={wallpaper.PoolKey}; history not consumed");
+
+        ScheduleRefill(wallpaper.PoolKey, wallpaper.Target);
+    }
+
+    private void ScheduleRefill(string poolKey, Size target)
+    {
+        if (_disposeCts.IsCancellationRequested)
             return;
 
-        var unseen = payload.Data.Where(x => !_history.Contains(x.Id)).ToList();
-        var source = unseen.Count > 0 ? unseen : payload.Data;
+        if (_backgroundRefill is { IsCompleted: false })
+            return;
 
-        foreach (var item in source.OrderBy(_ => Random.Shared.Next()))
-            _pool.Enqueue(item);
-    }
-
-    private async Task<string> DownloadAsync(WallpaperItem item, CancellationToken cancellationToken)
-    {
-        var uri = new Uri(item.Path);
-        var extension = Path.GetExtension(uri.AbsolutePath);
-        if (string.IsNullOrWhiteSpace(extension) || extension.Length > 5)
-            extension = ".jpg";
-
-        var finalPath = Path.Combine(AppPaths.CacheDirectory, $"{item.Id}{extension.ToLowerInvariant()}");
-        if (File.Exists(finalPath))
+        _backgroundRefill = Task.Run(async () =>
         {
-            File.SetLastWriteTime(finalPath, DateTime.Now);
-            return finalPath;
-        }
-
-        var tempPath = finalPath + ".tmp";
-        using var response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-
-        await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
-        await using (var output = File.Create(tempPath))
-        {
-            await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
-        }
-
-        File.Move(tempPath, finalPath, true);
-        return finalPath;
-    }
-
-    private void CleanupCache()
-    {
-        try
-        {
-            var files = Directory.EnumerateFiles(AppPaths.CacheDirectory)
-                .Where(path => !path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
-                .Select(path => new FileInfo(path))
-                .OrderByDescending(info => info.LastWriteTimeUtc)
-                .ToList();
-
-            var maxBytes = (long)_settings.CacheMaxMiB * 1024L * 1024L;
-            long retainedBytes = 0;
-            var retainedFiles = 0;
-
-            foreach (var file in files)
+            try
             {
-                var fitsCount = retainedFiles < _settings.CacheMaxFiles;
-                var fitsBytes = retainedBytes + file.Length <= maxBytes;
-                if (fitsCount && fitsBytes)
+                await _gate.WaitAsync(_disposeCts.Token)
+                    .ConfigureAwait(false);
+
+                try
                 {
-                    retainedFiles++;
-                    retainedBytes += file.Length;
+                    if (_cache.CountPool(poolKey) <
+                        _settings.CacheTargetFiles)
+                    {
+                        await RefillPoolAsync(
+                                poolKey,
+                                target,
+                                _settings.CacheTargetFiles,
+                                allowRecent: false,
+                                _disposeCts.Token)
+                            .ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    _gate.Release();
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Log.Write(
+                    "WARN",
+                    $"background_refill_failed pool={poolKey}: {ex.Message}");
+            }
+        });
+    }
+
+    private async Task RefillPoolAsync(
+        string poolKey,
+        Size target,
+        int requestedTarget,
+        bool allowRecent,
+        CancellationToken cancellationToken)
+    {
+        requestedTarget = Math.Clamp(
+            requestedTarget,
+            1,
+            _settings.CacheTargetFiles);
+
+        if (_cache.CountPool(poolKey) >= requestedTarget)
+            return;
+
+        if (!_cursors.TryGetValue(poolKey, out var cursor))
+        {
+            cursor = new PoolCursor
+            {
+                Page = Random.Shared.Next(1, 5)
+            };
+            _cursors[poolKey] = cursor;
+        }
+
+        var attempts = 0;
+        var metadataChecks = 0;
+
+        while (_cache.CountPool(poolKey) < requestedTarget &&
+               attempts < MaxSearchPagesPerRefill &&
+               !cancellationToken.IsCancellationRequested)
+        {
+            WallhavenSearchResult result;
+
+            try
+            {
+                result = await _client.SearchAsync(
+                        _settings,
+                        target,
+                        cursor.Page,
+                        cursor.Seed,
+                        broadQuery: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Log.Write(
+                    "WARN",
+                    $"search_failed pool={poolKey} page={cursor.Page}: {ex.Message}");
+                break;
+            }
+
+            attempts++;
+
+            var filteredQuery = ContentFilterPolicy.Compose(
+                _settings.Query,
+                _settings.ContentFilter);
+
+            // Negative terms are only a search optimisation. If they collapse a
+            // narrow listing, retry the same SFW page broadly and keep metadata
+            // filtering authoritative.
+            if (result.Items.Count == 0 &&
+                _settings.ContentFilter != ContentFilterMode.Standard &&
+                !string.Equals(
+                    filteredQuery,
+                    _settings.Query.Trim(),
+                    StringComparison.Ordinal))
+            {
+                Log.Write(
+                    "WARN",
+                    $"filtered_empty_fallback pool={poolKey} page={cursor.Page}");
+
+                result = await _client.SearchAsync(
+                        _settings,
+                        target,
+                        cursor.Page,
+                        cursor.Seed,
+                        broadQuery: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (_settings.Sorting == WallhavenSorting.Random &&
+                string.IsNullOrWhiteSpace(cursor.Seed) &&
+                !string.IsNullOrWhiteSpace(result.Seed))
+            {
+                cursor.Seed = result.Seed;
+            }
+
+            var history = _history.Snapshot();
+            var metadataLimitReached = false;
+
+            var orderedItems = allowRecent
+                ? result.Items.OrderBy(item =>
+                    history.LastSeenUtc(item.Id) ??
+                    DateTimeOffset.MinValue)
+                : result.Items.OrderBy(_ => Random.Shared.Next());
+
+            foreach (var item in orderedItems)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (_cache.CountPool(poolKey) >= requestedTarget)
+                    break;
+
+                if (history.IsSeenToday(item.Id))
+                {
+                    Reject(
+                        DiagnosticCounters.DailyRepeat,
+                        item.Id,
+                        poolKey);
                     continue;
                 }
 
-                try { file.Delete(); } catch { }
+                if (!allowRecent && history.IsRecent(item.Id))
+                {
+                    Reject(
+                        DiagnosticCounters.RecentHistory,
+                        item.Id,
+                        poolKey);
+                    continue;
+                }
+
+                var extension = Path.GetExtension(
+                    new Uri(item.Path).AbsolutePath);
+
+                var reservation = _cache.TryReserveDownload(
+                    item.Id,
+                    poolKey,
+                    extension);
+
+                if (reservation is null)
+                {
+                    Reject(
+                        DiagnosticCounters.PendingDuplicate,
+                        item.Id,
+                        poolKey);
+                    continue;
+                }
+
+                try
+                {
+                    if (ContentFilterPolicy.RequiresMetadataInspection(
+                            _settings.ContentFilter))
+                    {
+                        if (metadataChecks >=
+                            ContentFilterPolicy.MaxMetadataChecksPerRefill)
+                        {
+                            metadataLimitReached = true;
+                            _cache.CancelDownload(reservation);
+                            break;
+                        }
+
+                        metadataChecks++;
+
+                        WallpaperMetadata metadata;
+                        try
+                        {
+                            metadata = await _client.MetadataAsync(
+                                    item.Id,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                            when (ex is not OperationCanceledException)
+                        {
+                            // Filtered modes fail closed if metadata cannot be
+                            // inspected.
+                            Log.Write(
+                                "WARN",
+                                $"metadata_failure id={item.Id}: {ex.Message}");
+                            _cache.CancelDownload(reservation);
+                            continue;
+                        }
+
+                        var decision = ContentFilterPolicy.Evaluate(
+                            metadata.Category,
+                            metadata.Tags,
+                            _settings.ContentFilter);
+
+                        if (!decision.Allowed)
+                        {
+                            var counter =
+                                _settings.ContentFilter ==
+                                ContentFilterMode.Strict
+                                    ? DiagnosticCounters.StrictFilter
+                                    : DiagnosticCounters.ReducedFilter;
+
+                            DiagnosticsStore.Increment(counter);
+
+                            Log.Write(
+                                "INFO",
+                                $"{counter} id={item.Id} category={decision.Category} " +
+                                $"score={decision.Score} tags={string.Join(',', decision.BlockedTags)} " +
+                                $"reasons={string.Join('|', decision.Reasons)}");
+
+                            _cache.CancelDownload(reservation);
+                            continue;
+                        }
+                    }
+
+                    await _client.DownloadAsync(
+                            item,
+                            reservation.TempPath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+
+                    _cache.CommitDownload(reservation);
+                }
+                catch (OperationCanceledException)
+                {
+                    _cache.CancelDownload(reservation);
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _cache.CancelDownload(reservation);
+                    Log.Write(
+                        "WARN",
+                        $"download_failed id={item.Id}: {ex.Message}");
+                }
+            }
+
+            cursor.Page++;
+
+            var lastPage = Math.Max(1, result.LastPage);
+            if (cursor.Page > lastPage || cursor.Page > 20)
+            {
+                cursor.Page = 1;
+
+                if (_settings.Sorting ==
+                    WallhavenSorting.Random)
+                {
+                    cursor.Seed = null;
+                }
+            }
+
+            if (result.Items.Count == 0 ||
+                metadataLimitReached)
+            {
+                break;
             }
         }
-        catch { }
+
+        _cache.EnforceLimits();
     }
 
-    private static string? GetRandomCachedImage()
+    private static void Reject(
+        string counter,
+        string id,
+        string poolKey)
     {
-        try
-        {
-            var files = Directory.EnumerateFiles(AppPaths.CacheDirectory)
-                .Where(path => path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                            || path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)
-                            || path.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-
-            return files.Length == 0 ? null : files[Random.Shared.Next(files.Length)];
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static bool SimilarTarget(Size a, Size b)
-    {
-        if (a.Width == 0 || a.Height == 0 || b.Width == 0 || b.Height == 0)
-            return false;
-        return Math.Abs((double)a.Width / a.Height - (double)b.Width / b.Height) < 0.05;
+        DiagnosticsStore.Increment(counter);
+        Log.Write(
+            "INFO",
+            $"{counter} id={id} pool={poolKey}");
     }
 
     public void Dispose()
     {
-        _http.Dispose();
-        _fetchLock.Dispose();
-    }
-}
+        _disposeCts.Cancel();
 
-internal sealed class HistoryStore
-{
-    private readonly int _max;
-    private readonly LinkedList<string> _ids = new();
-    private readonly HashSet<string> _set = new(StringComparer.OrdinalIgnoreCase);
-
-    public HistoryStore(int max)
-    {
-        _max = Math.Max(50, max);
-        Load();
-    }
-
-    public bool Contains(string id) => _set.Contains(id);
-
-    public void Add(string id)
-    {
-        if (_set.Remove(id))
-        {
-            var existing = _ids.Find(id);
-            if (existing is not null)
-                _ids.Remove(existing);
-        }
-
-        _ids.AddLast(id);
-        _set.Add(id);
-
-        while (_ids.Count > _max)
-        {
-            var first = _ids.First;
-            if (first is null) break;
-            _set.Remove(first.Value);
-            _ids.RemoveFirst();
-        }
-
-        Save();
-    }
-
-    private void Load()
-    {
         try
         {
-            AppPaths.EnsureCreated();
-            if (!File.Exists(AppPaths.HistoryPath)) return;
-            var ids = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(AppPaths.HistoryPath));
-            if (ids is null) return;
-            foreach (var id in ids.TakeLast(_max))
-            {
-                if (_set.Add(id))
-                    _ids.AddLast(id);
-            }
+            _backgroundRefill?.Wait(TimeSpan.FromSeconds(1));
         }
         catch { }
+
+        _client.Dispose();
+        _gate.Dispose();
+        _disposeCts.Dispose();
     }
 
-    private void Save()
+    private sealed class PoolCursor
     {
-        try
-        {
-            File.WriteAllText(AppPaths.HistoryPath, JsonSerializer.Serialize(_ids.ToArray()));
-        }
-        catch { }
+        public int Page { get; set; } = 1;
+        public string? Seed { get; set; }
     }
-}
-
-internal sealed class WallhavenSearchResponse
-{
-    [JsonPropertyName("data")]
-    public List<WallpaperItem> Data { get; set; } = new();
-}
-
-internal sealed class WallpaperItem
-{
-    [JsonPropertyName("id")]
-    public string Id { get; set; } = "";
-
-    [JsonPropertyName("path")]
-    public string Path { get; set; } = "";
 }

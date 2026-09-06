@@ -1,6 +1,6 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
-using System.Diagnostics;
 
 namespace WallhavenScreensaver;
 
@@ -8,12 +8,15 @@ internal sealed class ConfigForm : Form
 {
     private readonly ComboBox _sorting = new();
     private readonly ComboBox _category = new();
+    private readonly TextBox _query = new();
+    private readonly ComboBox _contentFilter = new();
+    private readonly Label _contentFilterDescription = new();
     private readonly NumericUpDown _interval = new();
     private readonly ComboBox _transition = new();
     private readonly ComboBox _scaleMode = new();
     private readonly ComboBox _multiMonitor = new();
     private readonly CheckBox _displayAware = new();
-    private readonly CheckBox _cacheFallback = new();
+    private readonly NumericUpDown _cacheTargetFiles = new();
     private readonly NumericUpDown _cacheMaxFiles = new();
     private readonly NumericUpDown _cacheMaxMiB = new();
     private readonly NumericUpDown _historyMaxIds = new();
@@ -25,8 +28,8 @@ internal sealed class ConfigForm : Form
 
         Text = "Wallhaven Screensaver — Options";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(650, 700);
-        Size = new Size(700, 880);
+        MinimumSize = new Size(720, 820);
+        Size = new Size(780, 1020);
         MaximizeBox = false;
         MinimizeBox = false;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -40,6 +43,7 @@ internal sealed class ConfigForm : Form
             RowCount = 6,
             AutoScroll = true
         };
+
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -56,11 +60,22 @@ internal sealed class ConfigForm : Form
 
         Controls.Add(root);
         LoadSettingsIntoControls();
+
+        _contentFilter.SelectedIndexChanged +=
+            (_, _) => UpdateFilterDescription();
+
+        UpdateFilterDescription();
     }
 
     private Control BuildHeader()
     {
-        var panel = new Panel { Dock = DockStyle.Top, Height = 78, Margin = new Padding(0, 0, 0, 12) };
+        var panel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 78,
+            Margin = new Padding(0, 0, 0, 12)
+        };
+
         var title = new Label
         {
             Text = "Wallhaven Screensaver",
@@ -68,6 +83,7 @@ internal sealed class ConfigForm : Form
             AutoSize = true,
             Location = new Point(0, 0)
         };
+
         var subtitle = new Label
         {
             Text = "Économiseur d’écran Windows alimenté par l’API publique SFW de Wallhaven.",
@@ -75,6 +91,7 @@ internal sealed class ConfigForm : Form
             AutoSize = true,
             Location = new Point(2, 42)
         };
+
         panel.Controls.Add(title);
         panel.Controls.Add(subtitle);
         return panel;
@@ -82,23 +99,46 @@ internal sealed class ConfigForm : Form
 
     private Control BuildWallhavenGroup()
     {
-        var group = CreateGroup("Source Wallhaven", 150);
+        var group = CreateGroup("Source Wallhaven", 260);
         var table = CreateTwoColumnTable();
 
-        ConfigureCombo(_sorting, new[] { "Aléatoire", "Tendance", "Populaires", "Nouveaux" });
-        ConfigureCombo(_category, new[] { "Toutes", "Général", "Anime", "Personnes" });
+        ConfigureCombo(
+            _sorting,
+            ["Aléatoire", "Tendance", "Populaires", "Nouveaux"]);
+
+        ConfigureCombo(
+            _category,
+            ["Toutes", "Général", "Anime", "Personnes"]);
+
+        ConfigureCombo(
+            _contentFilter,
+            ["Standard", "Reduced", "Strict"]);
+
+        _query.Width = 360;
+        _query.MaxLength = 512;
+        _query.PlaceholderText = "Ex. +nature -people (optionnel)";
+
+        _contentFilterDescription.AutoSize = true;
+        _contentFilterDescription.MaximumSize = new Size(440, 0);
+        _contentFilterDescription.ForeColor = SystemColors.GrayText;
 
         AddRow(table, 0, "Sélection :", _sorting);
         AddRow(table, 1, "Catégorie :", _category);
+        AddRow(table, 2, "Requête :", _query);
+        AddRow(table, 3, "Filtrage :", _contentFilter);
+
+        table.Controls.Add(_contentFilterDescription, 1, 4);
 
         var sfw = new Label
         {
-            Text = "SFW uniquement • aucune clé API requise",
+            Text = "Wallhaven reste toujours interrogé avec purity=100. Reduced/Strict ajoutent un filtrage local des métadonnées/tags.",
             AutoSize = true,
+            MaximumSize = new Size(440, 0),
             ForeColor = SystemColors.GrayText,
-            Margin = new Padding(3, 10, 3, 3)
+            Margin = new Padding(3, 8, 3, 3)
         };
-        table.Controls.Add(sfw, 1, 2);
+
+        table.Controls.Add(sfw, 1, 5);
         group.Controls.Add(table);
         return group;
     }
@@ -112,15 +152,36 @@ internal sealed class ConfigForm : Form
         _interval.Maximum = 120;
         _interval.Width = 90;
 
-        ConfigureCombo(_transition, new[] { "Aucune", "Fondu — 500 ms", "Fondu — 750 ms", "Fondu — 1 s", "Fondu — 2 s" });
-        ConfigureCombo(_scaleMode, new[] { "Remplir l’écran (crop)", "Ajuster (bandes noires)" });
-        ConfigureCombo(_multiMonitor, new[] { "Même image sur tous les écrans", "Image différente par écran" });
+        ConfigureCombo(
+            _transition,
+            ["Aucune", "Fondu — 500 ms", "Fondu — 750 ms", "Fondu — 1 s", "Fondu — 2 s"]);
 
-        var intervalPanel = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        ConfigureCombo(
+            _scaleMode,
+            ["Remplir l’écran (crop)", "Ajuster (bandes noires)"]);
+
+        ConfigureCombo(
+            _multiMonitor,
+            ["Même image sur tous les écrans", "Image différente par écran"]);
+
+        var intervalPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+
         intervalPanel.Controls.Add(_interval);
-        intervalPanel.Controls.Add(new Label { Text = "minute(s)", AutoSize = true, Margin = new Padding(8, 6, 0, 0) });
+        intervalPanel.Controls.Add(
+            new Label
+            {
+                Text = "minute(s)",
+                AutoSize = true,
+                Margin = new Padding(8, 6, 0, 0)
+            });
 
-        _displayAware.Text = "Adapter la requête à la résolution et au ratio de l’écran";
+        _displayAware.Text =
+            "Adapter la requête à la résolution et au ratio de l’écran";
         _displayAware.AutoSize = true;
 
         AddRow(table, 0, "Changer l’image :", intervalPanel);
@@ -135,13 +196,14 @@ internal sealed class ConfigForm : Form
 
     private Control BuildCacheGroup()
     {
-        var group = CreateGroup("Cache et anti-répétition", 210);
+        var group = CreateGroup("Cache et anti-répétition", 300);
         var table = CreateTwoColumnTable();
 
-        _cacheFallback.Text = "Utiliser le cache si Wallhaven ou Internet est indisponible";
-        _cacheFallback.AutoSize = true;
+        _cacheTargetFiles.Minimum = 8;
+        _cacheTargetFiles.Maximum = 20;
+        _cacheTargetFiles.Width = 90;
 
-        _cacheMaxFiles.Minimum = 5;
+        _cacheMaxFiles.Minimum = 8;
         _cacheMaxFiles.Maximum = 200;
         _cacheMaxFiles.Width = 90;
 
@@ -150,20 +212,68 @@ internal sealed class ConfigForm : Form
         _cacheMaxMiB.Increment = 100;
         _cacheMaxMiB.Width = 90;
 
-        _historyMaxIds.Minimum = 50;
-        _historyMaxIds.Maximum = 5000;
-        _historyMaxIds.Increment = 50;
-        _historyMaxIds.Width = 90;
+        _historyMaxIds.Minimum = 1000;
+        _historyMaxIds.Maximum = 20000;
+        _historyMaxIds.Increment = 500;
+        _historyMaxIds.Width = 100;
 
-        table.Controls.Add(_cacheFallback, 1, 0);
-        AddRow(table, 1, "Images en cache :", _cacheMaxFiles);
+        AddRow(table, 0, "Pool prêt :", _cacheTargetFiles);
+        AddRow(table, 1, "Limite fichiers :", _cacheMaxFiles);
 
-        var cacheSizePanel = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        var cacheSizePanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+
         cacheSizePanel.Controls.Add(_cacheMaxMiB);
-        cacheSizePanel.Controls.Add(new Label { Text = "MiB", AutoSize = true, Margin = new Padding(8, 6, 0, 0) });
-        AddRow(table, 2, "Taille max :", cacheSizePanel);
-        AddRow(table, 3, "Historique d’IDs :", _historyMaxIds);
+        cacheSizePanel.Controls.Add(
+            new Label
+            {
+                Text = "MiB",
+                AutoSize = true,
+                Margin = new Padding(8, 6, 0, 0)
+            });
 
+        AddRow(table, 2, "Taille max :", cacheSizePanel);
+        AddRow(table, 3, "Historique long :", _historyMaxIds);
+
+        var actions = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Margin = new Padding(3, 8, 3, 3)
+        };
+
+        var clearCache = new Button
+        {
+            Text = "Vider le cache",
+            AutoSize = true
+        };
+
+        var resetHistory = new Button
+        {
+            Text = "Réinitialiser l’historique",
+            AutoSize = true
+        };
+
+        var diagnostics = new Button
+        {
+            Text = "Diagnostic",
+            AutoSize = true
+        };
+
+        clearCache.Click += (_, _) => ClearCache();
+        resetHistory.Click += (_, _) => ResetHistory();
+        diagnostics.Click += (_, _) => ShowDiagnostics();
+
+        actions.Controls.Add(clearCache);
+        actions.Controls.Add(resetHistory);
+        actions.Controls.Add(diagnostics);
+
+        table.Controls.Add(actions, 1, 4);
         group.Controls.Add(table);
         return group;
     }
@@ -172,9 +282,11 @@ internal sealed class ConfigForm : Form
     {
         return new Label
         {
-            Text = "Les réglages, l’historique et le cache sont stockés dans %LOCALAPPDATA%\\WallhavenScreensaver. Aucune télémétrie n’est envoyée par le projet.",
+            Text =
+                "L’historique est indépendant du cache : vider les images ne réinitialise jamais l’anti-répétition. " +
+                "Le filtre local repose sur les métadonnées Wallhaven, pas sur une reconnaissance d’image.",
             AutoSize = true,
-            MaximumSize = new Size(620, 0),
+            MaximumSize = new Size(680, 0),
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(4, 14, 4, 8)
         };
@@ -190,9 +302,26 @@ internal sealed class ConfigForm : Form
             Padding = new Padding(0, 8, 0, 0)
         };
 
-        var save = new Button { Text = "Enregistrer", AutoSize = true, Padding = new Padding(12, 5, 12, 5) };
-        var cancel = new Button { Text = "Annuler", AutoSize = true, Padding = new Padding(12, 5, 12, 5) };
-        var test = new Button { Text = "Tester", AutoSize = true, Padding = new Padding(12, 5, 12, 5) };
+        var save = new Button
+        {
+            Text = "Enregistrer",
+            AutoSize = true,
+            Padding = new Padding(12, 5, 12, 5)
+        };
+
+        var cancel = new Button
+        {
+            Text = "Annuler",
+            AutoSize = true,
+            Padding = new Padding(12, 5, 12, 5)
+        };
+
+        var test = new Button
+        {
+            Text = "Tester",
+            AutoSize = true,
+            Padding = new Padding(12, 5, 12, 5)
+        };
 
         save.Click += (_, _) => SaveAndClose();
         cancel.Click += (_, _) => Close();
@@ -225,7 +354,17 @@ internal sealed class ConfigForm : Form
             _ => 0
         };
 
+        _query.Text = _settings.Query;
+
+        _contentFilter.SelectedIndex = _settings.ContentFilter switch
+        {
+            ContentFilterMode.Standard => 0,
+            ContentFilterMode.Strict => 2,
+            _ => 1
+        };
+
         _interval.Value = _settings.IntervalMinutes;
+
         _transition.SelectedIndex = _settings.FadeMilliseconds switch
         {
             0 => 0,
@@ -234,18 +373,23 @@ internal sealed class ConfigForm : Form
             <= 1000 => 3,
             _ => 4
         };
-        _scaleMode.SelectedIndex = _settings.ScaleMode == ImageScaleMode.Fill ? 0 : 1;
-        _multiMonitor.SelectedIndex = _settings.MultiMonitorMode == MultiMonitorMode.SameImage ? 0 : 1;
+
+        _scaleMode.SelectedIndex =
+            _settings.ScaleMode == ImageScaleMode.Fill ? 0 : 1;
+
+        _multiMonitor.SelectedIndex =
+            _settings.MultiMonitorMode == MultiMonitorMode.SameImage ? 0 : 1;
+
         _displayAware.Checked = _settings.DisplayAwareFiltering;
-        _cacheFallback.Checked = _settings.UseCacheFallback;
-        _cacheMaxFiles.Value = Math.Clamp(_settings.CacheMaxFiles, 5, 200);
+        _cacheTargetFiles.Value = Math.Clamp(_settings.CacheTargetFiles, 8, 20);
+        _cacheMaxFiles.Value = Math.Clamp(_settings.CacheMaxFiles, 8, 200);
         _cacheMaxMiB.Value = Math.Clamp(_settings.CacheMaxMiB, 100, 5000);
-        _historyMaxIds.Value = Math.Clamp(_settings.HistoryMaxIds, 50, 5000);
+        _historyMaxIds.Value = Math.Clamp(_settings.HistoryMaxIds, 1000, 20000);
     }
 
     private AppSettings ReadControls()
     {
-        return new AppSettings
+        var settings = new AppSettings
         {
             Sorting = _sorting.SelectedIndex switch
             {
@@ -254,6 +398,7 @@ internal sealed class ConfigForm : Form
                 3 => WallhavenSorting.Newest,
                 _ => WallhavenSorting.Random
             },
+
             Category = _category.SelectedIndex switch
             {
                 1 => WallhavenCategory.General,
@@ -261,7 +406,18 @@ internal sealed class ConfigForm : Form
                 3 => WallhavenCategory.People,
                 _ => WallhavenCategory.All
             },
+
+            Query = _query.Text,
+
+            ContentFilter = _contentFilter.SelectedIndex switch
+            {
+                0 => ContentFilterMode.Standard,
+                2 => ContentFilterMode.Strict,
+                _ => ContentFilterMode.Reduced
+            },
+
             IntervalMinutes = (int)_interval.Value,
+
             FadeMilliseconds = _transition.SelectedIndex switch
             {
                 0 => 0,
@@ -270,14 +426,122 @@ internal sealed class ConfigForm : Form
                 3 => 1000,
                 _ => 2000
             },
-            ScaleMode = _scaleMode.SelectedIndex == 1 ? ImageScaleMode.Fit : ImageScaleMode.Fill,
-            MultiMonitorMode = _multiMonitor.SelectedIndex == 1 ? MultiMonitorMode.DifferentImage : MultiMonitorMode.SameImage,
+
+            ScaleMode =
+                _scaleMode.SelectedIndex == 1
+                    ? ImageScaleMode.Fit
+                    : ImageScaleMode.Fill,
+
+            MultiMonitorMode =
+                _multiMonitor.SelectedIndex == 1
+                    ? MultiMonitorMode.DifferentImage
+                    : MultiMonitorMode.SameImage,
+
             DisplayAwareFiltering = _displayAware.Checked,
-            UseCacheFallback = _cacheFallback.Checked,
+            CacheTargetFiles = (int)_cacheTargetFiles.Value,
             CacheMaxFiles = (int)_cacheMaxFiles.Value,
             CacheMaxMiB = (int)_cacheMaxMiB.Value,
             HistoryMaxIds = (int)_historyMaxIds.Value
         };
+
+        settings.Normalize();
+        return settings;
+    }
+
+    private void UpdateFilterDescription()
+    {
+        var mode = _contentFilter.SelectedIndex switch
+        {
+            0 => ContentFilterMode.Standard,
+            2 => ContentFilterMode.Strict,
+            _ => ContentFilterMode.Reduced
+        };
+
+        _contentFilterDescription.Text =
+            ContentFilterPolicy.Description(mode);
+    }
+
+    private void ClearCache()
+    {
+        if (MessageBox.Show(
+                this,
+                "Vider uniquement les images en cache ?\n\nL’historique anti-répétition sera conservé.",
+                "Wallhaven Screensaver",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        var settings = ReadControls();
+        var cache = new CacheStore(
+            maxFiles: settings.CacheMaxFiles,
+            maxBytes: (long)settings.CacheMaxMiB * 1024L * 1024L);
+
+        cache.ClearAll();
+
+        MessageBox.Show(
+            this,
+            "Cache vidé. L’historique n’a pas été modifié.",
+            "Wallhaven Screensaver",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+    }
+
+    private void ResetHistory()
+    {
+        if (MessageBox.Show(
+                this,
+                "Réinitialiser volontairement tout l’historique des wallpapers ?\n\nCette action est indépendante du cache et ne peut pas être annulée.",
+                "Wallhaven Screensaver",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        var settings = ReadControls();
+        new HistoryStore(settings.HistoryMaxIds).Clear();
+
+        MessageBox.Show(
+            this,
+            "Historique réinitialisé.",
+            "Wallhaven Screensaver",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+    }
+
+    private void ShowDiagnostics()
+    {
+        var settings = ReadControls();
+        var history = new HistoryStore(settings.HistoryMaxIds).Snapshot();
+        var cache = new CacheStore(
+            maxFiles: settings.CacheMaxFiles,
+            maxBytes: (long)settings.CacheMaxMiB * 1024L * 1024L).Stats();
+        var counters = DiagnosticsStore.Snapshot();
+
+        long Counter(string name) =>
+            counters.TryGetValue(name, out var value) ? value : 0;
+
+        var text =
+            $"Vus aujourd’hui : {history.SeenToday.Count}\n" +
+            $"Historique : {history.TotalCount}\n" +
+            $"Cache : {cache.Files} fichier(s), {cache.Bytes / 1024d / 1024d:F1} MiB\n" +
+            $"Téléchargements en attente : {cache.Pending}\n" +
+            $"Leases d’affichage : {cache.Leased}\n\n" +
+            $"Doublons jour rejetés : {Counter(DiagnosticCounters.DailyRepeat)}\n" +
+            $"Historique récent rejeté : {Counter(DiagnosticCounters.RecentHistory)}\n" +
+            $"Doublons cache/pending rejetés : {Counter(DiagnosticCounters.PendingDuplicate)}\n" +
+            $"Rejets Strict : {Counter(DiagnosticCounters.StrictFilter)}\n" +
+            $"Rejets Reduced : {Counter(DiagnosticCounters.ReducedFilter)}\n" +
+            $"Affichages acceptés : {Counter(DiagnosticCounters.Accepted)}";
+
+        MessageBox.Show(
+            this,
+            text,
+            "Diagnostic Wallhaven Screensaver",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
     }
 
     private void SaveAndClose()
@@ -290,7 +554,12 @@ internal sealed class ConfigForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Impossible d’enregistrer les réglages.\n\n{ex.Message}", "Wallhaven Screensaver", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(
+                this,
+                $"Impossible d’enregistrer les réglages.\n\n{ex.Message}",
+                "Wallhaven Screensaver",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
     }
 
@@ -300,25 +569,31 @@ internal sealed class ConfigForm : Form
         {
             SettingsStore.Save(ReadControls());
             var executable = Environment.ProcessPath;
+
             if (string.IsNullOrWhiteSpace(executable))
                 throw new InvalidOperationException("Chemin de l’exécutable introuvable.");
 
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = executable,
-                Arguments = "/s",
-                UseShellExecute = false
-            });
+            Process.Start(
+                new ProcessStartInfo
+                {
+                    FileName = executable,
+                    Arguments = "/s",
+                    UseShellExecute = false
+                });
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Impossible de lancer le test.\n\n{ex.Message}", "Wallhaven Screensaver", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(
+                this,
+                $"Impossible de lancer le test.\n\n{ex.Message}",
+                "Wallhaven Screensaver",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
     }
 
-    private static GroupBox CreateGroup(string text, int height)
-    {
-        return new GroupBox
+    private static GroupBox CreateGroup(string text, int height) =>
+        new()
         {
             Text = text,
             Dock = DockStyle.Top,
@@ -326,7 +601,6 @@ internal sealed class ConfigForm : Form
             Padding = new Padding(14, 12, 14, 12),
             Margin = new Padding(0, 0, 0, 12)
         };
-    }
 
     private static TableLayoutPanel CreateTwoColumnTable()
     {
@@ -334,15 +608,20 @@ internal sealed class ConfigForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 6,
+            RowCount = 8,
             AutoSize = false
         };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 165));
+
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         return table;
     }
 
-    private static void AddRow(TableLayoutPanel table, int row, string labelText, Control control)
+    private static void AddRow(
+        TableLayoutPanel table,
+        int row,
+        string labelText,
+        Control control)
     {
         while (table.RowStyles.Count <= row)
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -362,10 +641,12 @@ internal sealed class ConfigForm : Form
         table.Controls.Add(control, 1, row);
     }
 
-    private static void ConfigureCombo(ComboBox combo, IEnumerable<string> items)
+    private static void ConfigureCombo(
+        ComboBox combo,
+        IEnumerable<string> items)
     {
         combo.DropDownStyle = ComboBoxStyle.DropDownList;
         combo.Items.AddRange(items.Cast<object>().ToArray());
-        combo.Width = 320;
+        combo.Width = 360;
     }
 }

@@ -4,7 +4,12 @@ namespace WallhavenScreensaver;
 
 internal static class WallhavenQueryBuilder
 {
-    public static Uri Build(AppSettings settings, Size target, int? pageOverride = null)
+    public static Uri Build(
+        AppSettings settings,
+        Size target,
+        int page = 1,
+        string? seed = null,
+        bool broadQuery = false)
     {
         var sorting = settings.Sorting switch
         {
@@ -27,30 +32,47 @@ internal static class WallhavenQueryBuilder
             ["purity"] = "100",
             ["categories"] = categories,
             ["sorting"] = sorting,
-            ["order"] = "desc"
+            ["order"] = "desc",
+            ["page"] = Math.Max(1, page).ToString()
         };
+
+        var query = broadQuery
+            ? settings.Query.Trim()
+            : ContentFilterPolicy.Compose(
+                settings.Query,
+                settings.ContentFilter);
+
+        if (!string.IsNullOrWhiteSpace(query))
+            parameters["q"] = query;
 
         if (settings.Sorting == WallhavenSorting.Trending)
             parameters["topRange"] = "1d";
         else if (settings.Sorting == WallhavenSorting.Popular)
             parameters["topRange"] = "1M";
 
-        // Non-random modes otherwise keep returning the same leading API page.
-        // Rotating among the first pages expands the candidate set while
-        // preserving the selected ranking mode.
-        if (settings.Sorting != WallhavenSorting.Random)
-            parameters["page"] = (pageOverride ?? Random.Shared.Next(1, 13)).ToString();
-
-        if (settings.DisplayAwareFiltering && target.Width > 0 && target.Height > 0)
+        if (settings.Sorting == WallhavenSorting.Random &&
+            !string.IsNullOrWhiteSpace(seed))
         {
-            parameters["atleast"] = $"{target.Width}x{target.Height}";
-            parameters["ratios"] = ClosestWallhavenRatio(target);
+            parameters["seed"] = seed;
         }
 
-        var encoded = string.Join("&", parameters.Select(kv =>
-            $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+        if (settings.DisplayAwareFiltering &&
+            target.Width > 0 &&
+            target.Height > 0)
+        {
+            parameters["atleast"] =
+                $"{target.Width}x{target.Height}";
+            parameters["ratios"] =
+                ClosestWallhavenRatio(target);
+        }
 
-        return new Uri($"https://wallhaven.cc/api/v1/search?{encoded}");
+        var encoded = string.Join(
+            "&",
+            parameters.Select(kv =>
+                $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+
+        return new Uri(
+            $"https://wallhaven.cc/api/v1/search?{encoded}");
     }
 
     public static string ClosestWallhavenRatio(Size size)
@@ -75,6 +97,9 @@ internal static class WallhavenQueryBuilder
             ("9x18", 9d / 18d)
         };
 
-        return ratios.OrderBy(x => Math.Abs(x.Value - target)).First().Name;
+        return ratios
+            .OrderBy(x => Math.Abs(x.Value - target))
+            .First()
+            .Name;
     }
 }
