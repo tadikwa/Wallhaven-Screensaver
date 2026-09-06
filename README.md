@@ -1,4 +1,4 @@
-# Wallhaven Screensaver
+﻿# Wallhaven Screensaver
 
 Wallhaven Screensaver is a native Windows screen saver powered by the public **SFW** Wallhaven API.
 It rotates high-resolution artwork automatically, adapts Wallhaven searches to the display resolution/aspect ratio, and keeps a persistent anti-repeat history plus a small ready cache.
@@ -64,7 +64,7 @@ The timestamped history is stored under:
 %LOCALAPPDATA%\Wallhaven\history-v2.json
 ```
 
-The pre-redesign Windows ID-only history is migrated conservatively: because its original timestamps are unknowable, legacy IDs are treated as seen on the migration day so the hard daily rule cannot be weakened during upgrade.
+The pre-redesign Windows ID-only history is preserved as long-term recent history. Because that format contains no timestamps, it is not inserted into seenToday: exact same-day membership cannot be reconstructed retroactively. The hard daily guarantee begins with the first timestamped v3 display and then survives restarts, reboots, cache clears and later upgrades.
 
 > This repository contains the screen saver. The shared history location is intentionally suitable for the separate Windows desktop rotator, but that project needs a companion integration before a mathematically hard cross-application guarantee can be claimed.
 
@@ -72,7 +72,7 @@ The pre-redesign Windows ID-only history is migrated conservatively: because its
 
 The ready cache is intentionally much smaller than the history:
 
-- ready pool target: **12 images** by default (configurable 8–20);
+- ready pool target: **12 images** by default (configurable 8â€“20);
 - global file cap: 50 by default;
 - global size cap: 500 MiB by default;
 - asynchronous refill when the active pool drops below its low watermark.
@@ -110,7 +110,7 @@ A failed download or failed image decode/display does **not** consume the ID in 
 
 **Vider le cache** removes ready image files only. It never resets anti-repeat history.
 
-A separate, explicit **Réinitialiser l'historique** action is available and asks for confirmation.
+A separate, explicit **RÃ©initialiser l'historique** action is available and asks for confirmation.
 
 ## Diagnostics
 
@@ -160,13 +160,13 @@ Runtime logs remain under `%LOCALAPPDATA%\WallhavenScreensaver\logs`.
 
 ```text
 %LOCALAPPDATA%\WallhavenScreensaver
-├── settings.json
-├── diagnostics.json
-├── cache\
-└── logs\
+â”œâ”€â”€ settings.json
+â”œâ”€â”€ diagnostics.json
+â”œâ”€â”€ cache\
+â””â”€â”€ logs\
 
 %LOCALAPPDATA%\Wallhaven
-└── history-v2.json
+â””â”€â”€ history-v2.json
 ```
 
 ## Install
@@ -217,3 +217,4 @@ The current release is unsigned. Verify the SHA-256 file provided with a release
 ## License
 
 MIT. See [LICENSE](LICENSE).
+

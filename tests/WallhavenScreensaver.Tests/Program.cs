@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Text.Json;
 using WallhavenScreensaver;
 
@@ -197,7 +197,8 @@ try
         tomorrow.IsRecent("daily1"),
         "date change clears daily exclusion but keeps long history");
 
-    // Legacy ID-only migration fails closed for the migration day.
+    // Legacy ID-only history remains long-term recent without pretending it
+    // was displayed today.
     var legacyPath = Path.Combine(tempRoot, "legacy.json");
     var migratedPath = Path.Combine(tempRoot, "migrated.json");
     File.WriteAllText(
@@ -213,11 +214,47 @@ try
                    Guid.NewGuid().ToString("N"),
         legacyPath: legacyPath);
 
-    Check(
-        migrated.Snapshot().IsSeenToday("legacy1") &&
-        File.Exists(migratedPath),
-        "legacy ID-only history migrates conservatively");
+    var migratedSnapshot = migrated.Snapshot();
 
+    Check(
+        !migratedSnapshot.IsSeenToday("legacy1") &&
+        migratedSnapshot.IsRecent("legacy1") &&
+        File.Exists(migratedPath),
+        "legacy history stays recent without poisoning seenToday");
+
+    // Repair the exact v2 starvation failure produced by the first PR build:
+    // several migrated IDs sharing one identical current-day timestamp.
+    var buggyV2Path = Path.Combine(tempRoot, "buggy-v2.json");
+    var buggyTimestamp = localNow.ToUniversalTime().ToString("O");
+
+    File.WriteAllText(
+        buggyV2Path,
+        $$"""
+        {
+          "Version": 2,
+          "Entries": [
+            { "Id": "buggy1", "DisplayedAtUtc": "{{buggyTimestamp}}" },
+            { "Id": "buggy2", "DisplayedAtUtc": "{{buggyTimestamp}}" },
+            { "Id": "buggy3", "DisplayedAtUtc": "{{buggyTimestamp}}" }
+          ]
+        }
+        """);
+
+    var repairedV2 = new HistoryStore(
+        5000,
+        path: buggyV2Path,
+        nowLocal: () => localNow,
+        mutexName: @"Local\WallhavenScreensaverRepairTests_" +
+                   Guid.NewGuid().ToString("N"),
+        legacyPath: noLegacyPath);
+
+    var repairedSnapshot = repairedV2.Snapshot();
+
+    Check(
+        !repairedSnapshot.IsSeenToday("buggy1") &&
+        repairedSnapshot.IsRecent("buggy1") &&
+        !repairedSnapshot.IsSeenToday("buggy2"),
+        "buggy v2 migration is repaired out of seenToday");
     // Cache / pending dedup across pools.
     var cacheRoot = Path.Combine(tempRoot, "cache");
     var cache = new CacheStore(
@@ -405,3 +442,4 @@ else
     Console.WriteLine(
         "All regression checks passed.");
 }
+

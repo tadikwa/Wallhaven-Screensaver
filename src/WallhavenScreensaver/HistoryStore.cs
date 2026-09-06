@@ -32,7 +32,7 @@ internal sealed class HistoryStore
 {
     private sealed class HistoryDocument
     {
-        public int Version { get; set; } = 2;
+        public int Version { get; set; } = 3;
         public List<HistoryEntry> Entries { get; set; } = new();
     }
 
@@ -125,11 +125,24 @@ internal sealed class HistoryStore
                         root.GetRawText(),
                         SettingsStore.JsonOptions);
 
-                    return (parsed?.Entries ?? new List<HistoryEntry>())
+                    var entries = (parsed?.Entries ?? new List<HistoryEntry>())
                         .Where(x => !string.IsNullOrWhiteSpace(x.Id))
                         .OrderBy(x => x.DisplayedAtUtc)
                         .TakeLast(_max)
                         .ToList();
+
+                    // The first PR #4 test build wrote every legacy ID with the
+                    // same current timestamp. That made the complete old history
+                    // look like it had been displayed today and could starve the
+                    // provider. Repair only these synthetic same-timestamp groups
+                    // while upgrading the document from v2 to v3.
+                    if ((parsed?.Version ?? 0) <= 2 &&
+                        RepairBuggyV2Migration(entries))
+                    {
+                        migrated = true;
+                    }
+
+                    return entries;
                 }
 
                 if (root.ValueKind == JsonValueKind.Array)
@@ -171,26 +184,82 @@ internal sealed class HistoryStore
         if (root.ValueKind != JsonValueKind.Array)
             return new List<HistoryEntry>();
 
-        // Old Windows history contained IDs only. Their original timestamps are
-        // unknowable, so migration intentionally fails closed for the current day.
-        var migratedAt = _nowLocal().ToUniversalTime();
-
-        return root
+        var ids = root
             .EnumerateArray()
             .Where(x => x.ValueKind == JsonValueKind.String)
             .Select(x => x.GetString())
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .TakeLast(_max)
-            .Select(x => new HistoryEntry(x!, migratedAt))
+            .Select(x => x!)
             .ToList();
+
+        return BuildSyntheticLegacyHistory(ids);
+    }
+
+    private List<HistoryEntry> BuildSyntheticLegacyHistory(
+        IReadOnlyList<string> ids)
+    {
+        if (ids.Count == 0)
+            return new List<HistoryEntry>();
+
+        // The old ID-only format preserves order but not display timestamps.
+        // Keep the IDs in long-term recent history without inventing "today"
+        // membership. Up to 20,000 synthetic entries fit comfortably within
+        // yesterday afternoon/evening at one-second spacing.
+        var now = _nowLocal();
+        var todayStart = new DateTimeOffset(now.Date, now.Offset);
+        var start = todayStart.AddDays(-1).AddHours(12);
+
+        return ids
+            .Select((id, index) =>
+                new HistoryEntry(
+                    id,
+                    start.AddSeconds(index).ToUniversalTime()))
+            .ToList();
+    }
+
+    private bool RepairBuggyV2Migration(List<HistoryEntry> entries)
+    {
+        if (entries.Count == 0)
+            return false;
+
+        var syntheticGroups = entries
+            .GroupBy(x => x.DisplayedAtUtc)
+            .Where(g => g.Count() > 1)
+            .ToList();
+
+        if (syntheticGroups.Count == 0)
+            return false;
+
+        var syntheticIds = syntheticGroups
+            .SelectMany(g => g)
+            .Select(x => x.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var repaired = BuildSyntheticLegacyHistory(
+            entries
+                .Where(x => syntheticIds.Contains(x.Id))
+                .Select(x => x.Id)
+                .ToList());
+
+        entries.RemoveAll(x => syntheticIds.Contains(x.Id));
+        entries.AddRange(repaired);
+        entries.Sort((a, b) =>
+            a.DisplayedAtUtc.CompareTo(b.DisplayedAtUtc));
+
+        Log.Write(
+            "INFO",
+            $"history_migration_v2_repaired ids={syntheticIds.Count}");
+
+        return true;
     }
 
     private void SaveEntriesLocked(List<HistoryEntry> entries)
     {
         var document = new HistoryDocument
         {
-            Version = 2,
+            Version = 3,
             Entries = entries
                 .OrderBy(x => x.DisplayedAtUtc)
                 .TakeLast(_max)
