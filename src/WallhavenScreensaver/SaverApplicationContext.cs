@@ -32,32 +32,38 @@ internal sealed class SaverApplicationContext : ApplicationContext, IDisposable
         {
             Interval = Math.Max(1, settings.IntervalMinutes) * 60_000
         };
+
         _rotationTimer.Tick += async (_, _) => await RefreshImagesAsync();
 
         if (_preview && _previewParent != IntPtr.Zero)
         {
-            // Preview windows are owned by the Windows screen-saver settings
-            // dialog. End this process promptly when that host HWND disappears.
             _previewHostTimer = new System.Windows.Forms.Timer
             {
                 Interval = 500
             };
+
             _previewHostTimer.Tick += (_, _) =>
             {
                 if (!NativeMethods.IsWindow(_previewParent))
                     RequestExit();
             };
+
             _previewHostTimer.Start();
         }
 
         foreach (var form in _forms)
         {
             form.ExitRequested += (_, _) => RequestExit();
+
             form.FormClosed += (_, _) =>
             {
-                if (!_exiting && _forms.All(f => f.IsDisposed || !f.Visible))
+                if (!_exiting &&
+                    _forms.All(f => f.IsDisposed || !f.Visible))
+                {
                     ExitThread();
+                }
             };
+
             form.Show();
         }
 
@@ -73,20 +79,23 @@ internal sealed class SaverApplicationContext : ApplicationContext, IDisposable
     public static SaverApplicationContext CreateFullScreen()
     {
         var settings = SettingsStore.Load();
+
         var forms = Screen.AllScreens
             .Select(screen => new SaverForm(screen.Bounds, settings))
             .ToList();
 
         if (forms.Count == 0)
         {
-            forms.Add(
-                new SaverForm(
-                    Screen.PrimaryScreen?.Bounds ??
-                    new Rectangle(0, 0, 1920, 1080),
-                    settings));
+            forms.Add(new SaverForm(
+                Screen.PrimaryScreen?.Bounds ??
+                new Rectangle(0, 0, 1920, 1080),
+                settings));
         }
 
-        return new SaverApplicationContext(settings, forms, preview: false);
+        return new SaverApplicationContext(
+            settings,
+            forms,
+            preview: false);
     }
 
     public static SaverApplicationContext CreatePreview(IntPtr parentHandle)
@@ -120,6 +129,7 @@ internal sealed class SaverApplicationContext : ApplicationContext, IDisposable
             return;
 
         _refreshing = true;
+
         try
         {
             if (_settings.MultiMonitorMode == MultiMonitorMode.SameImage ||
@@ -130,34 +140,46 @@ internal sealed class SaverApplicationContext : ApplicationContext, IDisposable
                     .OrderByDescending(s => (long)s.Width * s.Height)
                     .FirstOrDefault();
 
-                var path =
-                    await _provider.GetNextImagePathAsync(target, _cts.Token);
+                var prepared = await _provider
+                    .GetNextWallpaperAsync(target, _cts.Token);
 
-                if (!string.IsNullOrWhiteSpace(path))
+                if (prepared is not null)
                 {
+                    var displayed = false;
+
                     foreach (var form in _forms.Where(f => !f.IsDisposed))
                     {
-                        form.TransitionTo(
-                            path,
+                        displayed |= form.TryTransitionTo(
+                            prepared.Path,
                             _preview ? 0 : _settings.FadeMilliseconds);
                     }
+
+                    if (displayed)
+                        _provider.CommitDisplayed(prepared);
+                    else
+                        _provider.MarkDisplayFailed(prepared);
                 }
             }
             else
             {
                 foreach (var form in _forms.Where(f => !f.IsDisposed))
                 {
-                    var path =
-                        await _provider.GetNextImagePathAsync(
+                    var prepared = await _provider
+                        .GetNextWallpaperAsync(
                             form.TargetSize,
                             _cts.Token);
 
-                    if (!string.IsNullOrWhiteSpace(path))
-                    {
-                        form.TransitionTo(
-                            path,
-                            _preview ? 0 : _settings.FadeMilliseconds);
-                    }
+                    if (prepared is null)
+                        continue;
+
+                    var displayed = form.TryTransitionTo(
+                        prepared.Path,
+                        _preview ? 0 : _settings.FadeMilliseconds);
+
+                    if (displayed)
+                        _provider.CommitDisplayed(prepared);
+                    else
+                        _provider.MarkDisplayFailed(prepared);
                 }
             }
         }

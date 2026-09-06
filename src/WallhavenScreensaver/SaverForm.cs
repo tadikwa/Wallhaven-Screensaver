@@ -1,7 +1,7 @@
 using System.Drawing;
-using System.Windows.Forms;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Windows.Forms;
 
 namespace WallhavenScreensaver;
 
@@ -21,9 +21,16 @@ internal sealed class SaverForm : Form
 
     public event EventHandler? ExitRequested;
 
-    public Size TargetSize => ClientSize.Width > 0 && ClientSize.Height > 0 ? ClientSize : Bounds.Size;
+    public Size TargetSize =>
+        ClientSize.Width > 0 && ClientSize.Height > 0
+            ? ClientSize
+            : Bounds.Size;
 
-    public SaverForm(Rectangle bounds, AppSettings settings, bool preview = false, IntPtr previewParent = default)
+    public SaverForm(
+        Rectangle bounds,
+        AppSettings settings,
+        bool preview = false,
+        IntPtr previewParent = default)
     {
         _settings = settings;
         _preview = preview;
@@ -54,13 +61,26 @@ internal sealed class SaverForm : Form
 
         if (_preview && _previewParent != IntPtr.Zero)
         {
-            var style = NativeMethods.GetWindowLongPtr(Handle, NativeMethods.GwlStyle).ToInt64();
+            var style = NativeMethods
+                .GetWindowLongPtr(Handle, NativeMethods.GwlStyle)
+                .ToInt64();
+
             style = (style | NativeMethods.WsChild) & ~NativeMethods.WsPopup;
-            NativeMethods.SetWindowLongPtr(Handle, NativeMethods.GwlStyle, new IntPtr(style));
+
+            NativeMethods.SetWindowLongPtr(
+                Handle,
+                NativeMethods.GwlStyle,
+                new IntPtr(style));
+
             NativeMethods.SetParent(Handle, _previewParent);
+
             if (NativeMethods.GetClientRect(_previewParent, out var rect))
             {
-                SetBounds(0, 0, Math.Max(1, rect.Width), Math.Max(1, rect.Height));
+                SetBounds(
+                    0,
+                    0,
+                    Math.Max(1, rect.Width),
+                    Math.Max(1, rect.Height));
             }
         }
         else
@@ -69,15 +89,23 @@ internal sealed class SaverForm : Form
         }
     }
 
-    public void TransitionTo(string path, int fadeMilliseconds)
+    public bool TryTransitionTo(string path, int fadeMilliseconds)
     {
         if (IsDisposed || Disposing)
-            return;
+            return false;
 
         if (InvokeRequired)
         {
-            try { BeginInvoke(() => TransitionTo(path, fadeMilliseconds)); } catch { }
-            return;
+            try
+            {
+                return (bool)Invoke(
+                    new Func<bool>(
+                        () => TryTransitionTo(path, fadeMilliseconds)));
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         try
@@ -93,7 +121,7 @@ internal sealed class SaverForm : Form
                 _currentImage = loaded;
                 _fadeAlpha = 1f;
                 Invalidate();
-                return;
+                return true;
             }
 
             _nextImage?.Dispose();
@@ -102,10 +130,14 @@ internal sealed class SaverForm : Form
             _fadeDurationMs = Math.Max(1, fadeMilliseconds);
             _fadeStarted = DateTime.UtcNow;
             _fadeTimer.Start();
+            return true;
         }
         catch (Exception ex)
         {
-            Log.Write("WARN", $"Unable to display '{path}': {ex.Message}");
+            Log.Write(
+                "WARN",
+                $"Unable to display '{path}': {ex.Message}");
+            return false;
         }
     }
 
@@ -139,35 +171,60 @@ internal sealed class SaverForm : Form
         if (_settings.ScaleMode == ImageScaleMode.Fit)
         {
             srcRect = new RectangleF(0, 0, image.Width, image.Height);
+
             if (imageRatio > targetRatio)
             {
                 var height = destination.Width / imageRatio;
-                destRect = new RectangleF(0, (destination.Height - height) / 2f, destination.Width, height);
+                destRect = new RectangleF(
+                    0,
+                    (destination.Height - height) / 2f,
+                    destination.Width,
+                    height);
             }
             else
             {
                 var width = destination.Height * imageRatio;
-                destRect = new RectangleF((destination.Width - width) / 2f, 0, width, destination.Height);
+                destRect = new RectangleF(
+                    (destination.Width - width) / 2f,
+                    0,
+                    width,
+                    destination.Height);
             }
         }
         else
         {
             destRect = destination;
+
             if (imageRatio > targetRatio)
             {
                 var cropWidth = image.Height * targetRatio;
-                srcRect = new RectangleF((image.Width - cropWidth) / 2f, 0, cropWidth, image.Height);
+                srcRect = new RectangleF(
+                    (image.Width - cropWidth) / 2f,
+                    0,
+                    cropWidth,
+                    image.Height);
             }
             else
             {
                 var cropHeight = image.Width / targetRatio;
-                srcRect = new RectangleF(0, (image.Height - cropHeight) / 2f, image.Width, cropHeight);
+                srcRect = new RectangleF(
+                    0,
+                    (image.Height - cropHeight) / 2f,
+                    image.Width,
+                    cropHeight);
             }
         }
 
         using var attributes = new ImageAttributes();
-        var matrix = new ColorMatrix { Matrix33 = Math.Clamp(alpha, 0f, 1f) };
-        attributes.SetColorMatrix(matrix, ColorMatrixFlag.Default, ColorAdjustType.Bitmap);
+        var matrix = new ColorMatrix
+        {
+            Matrix33 = Math.Clamp(alpha, 0f, 1f)
+        };
+
+        attributes.SetColorMatrix(
+            matrix,
+            ColorMatrixFlag.Default,
+            ColorAdjustType.Bitmap);
 
         graphics.DrawImage(
             image,
@@ -183,7 +240,11 @@ internal sealed class SaverForm : Form
     private void AdvanceFade()
     {
         var elapsed = (DateTime.UtcNow - _fadeStarted).TotalMilliseconds;
-        _fadeAlpha = (float)Math.Clamp(elapsed / _fadeDurationMs, 0d, 1d);
+        _fadeAlpha = (float)Math.Clamp(
+            elapsed / _fadeDurationMs,
+            0d,
+            1d);
+
         Invalidate();
 
         if (_fadeAlpha >= 1f && _nextImage is not null)
@@ -199,8 +260,17 @@ internal sealed class SaverForm : Form
 
     private static Image LoadDetachedImage(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        using var image = Image.FromStream(stream, useEmbeddedColorManagement: true, validateImageData: true);
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+
+        using var image = Image.FromStream(
+            stream,
+            useEmbeddedColorManagement: true,
+            validateImageData: true);
+
         return new Bitmap(image);
     }
 
@@ -238,6 +308,7 @@ internal sealed class SaverForm : Form
             _currentImage?.Dispose();
             _nextImage?.Dispose();
         }
+
         base.Dispose(disposing);
     }
 }
